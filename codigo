@@ -1,240 +1,235 @@
-from flask import Flask, jsonify, request
+from flask import Flask, request, jsonify
 from flask_sqlalchemy import SQLAlchemy
-from sqlalchemy.exc import IntegrityError
 from datetime import datetime
+import os
+import re
+import xml.etree.ElementTree as ET
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+import unittest
+
+# --- Configurações iniciais ---
 
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///estoque.db'
+db_path = os.path.join(os.getcwd(), 'database.db')
+app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['TESTING'] = True
 db = SQLAlchemy(app)
 
-# Modelos
-class Categoria(db.Model):
+# --- MODELOS ---
+
+class Pedido(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    nome = db.Column(db.String(100), nullable=False, unique=True)
+    cliente = db.Column(db.String(100))
+    valor = db.Column(db.Float)
+    data = db.Column(db.DateTime, default=datetime.utcnow)
 
-class Produto(db.Model):
+class Fatura(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    nome = db.Column(db.String(100), nullable=False)
-    descricao = db.Column(db.String(255))
-    preco = db.Column(db.Float, nullable=False)
-    quantidade = db.Column(db.Integer, default=0)
-    categoria_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=True)
-    categoria = db.relationship('Categoria', backref=db.backref('produtos', lazy=True))
+    pedido_id = db.Column(db.Integer, db.ForeignKey('pedido.id'))
+    pdf_path = db.Column(db.String(200))
+    xml_path = db.Column(db.String(200))
 
-class Movimentacao(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    tipo = db.Column(db.String(10), nullable=False)  # 'entrada' ou 'saida'
-    quantidade = db.Column(db.Integer, nullable=False)
-    data = db.Column(db.DateTime, default=db.func.now())
-    produto_id = db.Column(db.Integer, db.ForeignKey('produto.id'), nullable=False)
-    produto = db.relationship('Produto', backref=db.backref('movimentacoes', lazy=True))
+# --- FUNÇÕES UTILITÁRIAS ---
 
-@app.before_first_request
-def init_db():
-    db.create_all()
-
-# Rotas de Categorias
-@app.route('/categorias', methods=['GET'])
-def listar_categorias():
-    categorias = Categoria.query.all()
-    return jsonify([{'id': c.id, 'nome': c.nome} for c in categorias])
-
-@app.route('/categorias', methods=['POST'])
-def criar_categoria():
-    data = request.get_json()
-    if 'nome' not in data:
-        return jsonify({'erro': 'Campo "nome" é obrigatório'}), 400
-
-    nova_categoria = Categoria(nome=data['nome'])
+def gerar_pdf(pedido):
     try:
-        db.session.add(nova_categoria)
+        os.makedirs("notas", exist_ok=True)
+        path = os.path.join("notas", f"nota_{pedido.id}.pdf")
+        c = canvas.Canvas(path, pagesize=letter)
+        c.setFont("Helvetica", 12)
+        c.drawString(100, 750, "Nota Fiscal PDF")
+        c.drawString(100, 730, f"Cliente: {pedido.cliente}")
+        c.drawString(100, 710, f"Valor: R${pedido.valor:.2f}")
+        c.drawString(100, 690, f"Data: {pedido.data.strftime('%d/%m/%Y %H:%M')}")
+        c.save()
+        return path
+    except Exception as e:
+        raise RuntimeError(f"Erro ao gerar PDF: {e}")
+
+def gerar_xml(pedido):
+    try:
+        os.makedirs("notas", exist_ok=True)
+        path = os.path.join("notas", f"nota_{pedido.id}.xml")
+        nota = ET.Element('nota')
+        cliente = ET.SubElement(nota, 'cliente')
+        cliente.text = pedido.cliente
+        valor = ET.SubElement(nota, 'valor')
+        valor.text = f"{pedido.valor:.2f}"
+        data = ET.SubElement(nota, 'data')
+        data.text = pedido.data.strftime('%Y-%m-%d %H:%M')
+        arvore = ET.ElementTree(nota)
+        arvore.write(path, encoding='utf-8', xml_declaration=True)
+        return path
+    except Exception as e:
+        raise RuntimeError(f"Erro ao gerar XML: {e}")
+
+def validar_cliente(cliente):
+    if not cliente or not isinstance(cliente, str) or cliente.strip() == '':
+        return False, "Cliente inválido ou vazio."
+    return True, ""
+
+def validar_valor(valor):
+    try:
+        val = float(valor)
+        if val <= 0:
+            return False, "Valor deve ser positivo."
+        return True, ""
+    except (ValueError, TypeError):
+        return False, "Valor deve ser numérico."
+
+def validar_email(email):
+    padrao = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+    if not email or not re.match(padrao, email):
+        return False, "Email inválido."
+    return True, ""
+
+def enviar_email(destinatario, pdf_path, xml_path):
+    # Implementação real poderia usar smtplib ou serviços externos
+    print(f"[SIMULADO] Enviando e-mail para {destinatario} com anexos {pdf_path} e {xml_path}")
+
+# --- ROTAS ---
+
+@app.route('/emitir_fatura', methods=['POST'])
+def emitir_fatura():
+    dados = request.json
+    cliente = dados.get('cliente')
+    valor = dados.get('valor')
+
+    valido, msg = validar_cliente(cliente)
+    if not valido:
+        return jsonify({'erro': msg}), 400
+
+    valido, msg = validar_valor(valor)
+    if not valido:
+        return jsonify({'erro': msg}), 400
+
+    try:
+        pedido = Pedido(cliente=cliente, valor=valor)
+        db.session.add(pedido)
         db.session.commit()
-    except IntegrityError:
+
+        pdf_path = gerar_pdf(pedido)
+        xml_path = gerar_xml(pedido)
+
+        fatura = Fatura(pedido_id=pedido.id, pdf_path=pdf_path, xml_path=xml_path)
+        db.session.add(fatura)
+        db.session.commit()
+    except Exception as e:
         db.session.rollback()
-        return jsonify({'erro': 'Categoria já existe'}), 400
+        return jsonify({'erro': f'Erro ao processar a fatura: {e}'}), 500
 
-    return jsonify({'id': nova_categoria.id, 'nome': nova_categoria.nome}), 201
+    return jsonify({'mensagem': 'Fatura emitida com sucesso!', 'pedido_id': pedido.id})
 
-@app.route('/categorias/<int:id>', methods=['PUT'])
-def editar_categoria(id):
-    data = request.get_json()
-    if 'nome' not in data:
-        return jsonify({'erro': 'Campo "nome" é obrigatório'}), 400
-
-    categoria = Categoria.query.get_or_404(id)
-    categoria.nome = data['nome']
-    db.session.commit()
-    return jsonify({'id': categoria.id, 'nome': categoria.nome})
-
-@app.route('/categorias/<int:id>', methods=['DELETE'])
-def deletar_categoria(id):
-    categoria = Categoria.query.get_or_404(id)
-    if categoria.produtos:
-        return jsonify({'erro': 'Não é possível deletar categoria com produtos associados'}), 400
-
-    db.session.delete(categoria)
-    db.session.commit()
-    return jsonify({'mensagem': 'Categoria deletada com sucesso'})
-
-# Rotas de Produtos
-@app.route('/produtos', methods=['GET'])
-def listar_produtos():
-    produtos = Produto.query.all()
+@app.route('/historico_pedidos', methods=['GET'])
+def historico_pedidos():
+    pedidos = Pedido.query.all()
     return jsonify([
-        {
-            'id': p.id,
-            'nome': p.nome,
-            'descricao': p.descricao,
-            'preco': p.preco,
-            'quantidade': p.quantidade,
-            'categoria_id': p.categoria_id
-        } for p in produtos
+        {'id': p.id, 'cliente': p.cliente, 'valor': p.valor, 'data': p.data.strftime('%Y-%m-%d %H:%M')} for p in pedidos
     ])
 
-@app.route('/produtos', methods=['POST'])
-def criar_produto():
-    data = request.get_json()
-    obrigatorios = ['nome', 'preco']
-    if not all(campo in data for campo in obrigatorios):
-        return jsonify({'erro': 'Campos "nome" e "preco" são obrigatórios'}), 400
+@app.route('/nota_fiscal/<int:pedido_id>', methods=['GET'])
+def nota_fiscal(pedido_id):
+    fatura = Fatura.query.filter_by(pedido_id=pedido_id).first()
+    if not fatura:
+        return jsonify({'erro': 'Fatura não encontrada'}), 404
+    return jsonify({'pdf': fatura.pdf_path, 'xml': fatura.xml_path})
 
-    novo_produto = Produto(
-        nome=data['nome'],
-        descricao=data.get('descricao', ''),
-        preco=data['preco'],
-        quantidade=data.get('quantidade', 0),
-        categoria_id=data.get('categoria_id')
-    )
-    db.session.add(novo_produto)
-    db.session.commit()
-    return jsonify({'id': novo_produto.id, 'nome': novo_produto.nome}), 201
+@app.route('/enviar_nota/<int:pedido_id>', methods=['POST'])
+def enviar_nota(pedido_id):
+    fatura = Fatura.query.filter_by(pedido_id=pedido_id).first()
+    if not fatura:
+        return jsonify({'erro': 'Fatura não encontrada'}), 404
 
-@app.route('/produtos/<int:id>', methods=['PUT'])
-def editar_produto(id):
-    data = request.get_json()
-    obrigatorios = ['nome', 'preco', 'quantidade']
-    if not all(campo in data for campo in obrigatorios):
-        return jsonify({'erro': 'Campos "nome", "preco" e "quantidade" são obrigatórios'}), 400
+    dados = request.json
+    email_destino = dados.get('email')
 
-    produto = Produto.query.get_or_404(id)
-    produto.nome = data['nome']
-    produto.descricao = data.get('descricao', '')
-    produto.preco = data['preco']
-    produto.quantidade = data['quantidade']
-    produto.categoria_id = data.get('categoria_id')
-    db.session.commit()
-    return jsonify({'id': produto.id, 'nome': produto.nome})
+    valido, msg = validar_email(email_destino)
+    if not valido:
+        return jsonify({'erro': msg}), 400
 
-@app.route('/produtos/<int:id>', methods=['DELETE'])
-def deletar_produto(id):
-    produto = Produto.query.get_or_404(id)
-    db.session.delete(produto)
-    db.session.commit()
-    return jsonify({'mensagem': 'Produto deletado com sucesso'})
+    try:
+        enviar_email(email_destino, fatura.pdf_path, fatura.xml_path)
+    except Exception as e:
+        return jsonify({'erro': f'Erro ao enviar o e-mail: {e}'}), 500
 
-# Rotas de Movimentações
-@app.route('/movimentacoes', methods=['POST'])
-def registrar_movimentacao():
-    data = request.get_json()
-    tipo = data.get('tipo')
-    quantidade = data.get('quantidade')
-    produto_id = data.get('produto_id')
+    return jsonify({'mensagem': f'Nota enviada com sucesso para {email_destino}'})
 
-    if tipo not in ['entrada', 'saida'] or not all([quantidade, produto_id]):
-        return jsonify({'erro': 'Dados inválidos'}), 400
+# --- TESTES ---
 
-    produto = Produto.query.get_or_404(produto_id)
+class TesteRotas(unittest.TestCase):
+    def setUp(self):
+        app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///:memory:'
+        app.config['TESTING'] = True
+        self.app = app.test_client()
+        with app.app_context():
+            db.create_all()
 
-    if tipo == 'entrada':
-        produto.quantidade += quantidade
-    elif tipo == 'saida':
-        if produto.quantidade < quantidade:
-            return jsonify({'erro': 'Quantidade insuficiente em estoque'}), 400
-        produto.quantidade -= quantidade
+    def tearDown(self):
+        with app.app_context():
+            db.session.remove()
+            db.drop_all()
 
-    movimentacao = Movimentacao(tipo=tipo, quantidade=quantidade, produto_id=produto_id)
-    db.session.add(movimentacao)
-    db.session.commit()
+    def test_emitir_fatura(self):
+        resposta = self.app.post('/emitir_fatura', json={'cliente': 'João', 'valor': 150.75})
+        self.assertEqual(resposta.status_code, 200)
+        dados = resposta.get_json()
+        self.assertIn('pedido_id', dados)
 
-    return jsonify({'mensagem': 'Movimentação registrada com sucesso'})
+    def test_emitir_fatura_invalido(self):
+        resposta = self.app.post('/emitir_fatura', json={'cliente': '', 'valor': -10})
+        self.assertEqual(resposta.status_code, 400)
+        dados = resposta.get_json()
+        self.assertIn('erro', dados)
 
-@app.route('/movimentacoes', methods=['GET'])
-def listar_movimentacoes():
-    movimentacoes = Movimentacao.query.order_by(Movimentacao.data.desc()).all()
-    return jsonify([
-        {
-            'id': m.id,
-            'tipo': m.tipo,
-            'quantidade': m.quantidade,
-            'data': m.data.isoformat(),
-            'produto_id': m.produto_id
-        } for m in movimentacoes
-    ])
+    def test_historico_pedidos(self):
+        self.app.post('/emitir_fatura', json={'cliente': 'Maria', 'valor': 99.90})
+        resposta = self.app.get('/historico_pedidos')
+        self.assertEqual(resposta.status_code, 200)
+        self.assertGreaterEqual(len(resposta.get_json()), 1)
 
-# Relatórios
-@app.route('/relatorios/estoque', methods=['GET'])
-def relatorio_estoque():
-    produtos = Produto.query.all()
-    return jsonify([
-        {
-            'id': p.id,
-            'nome': p.nome,
-            'quantidade': p.quantidade
-        } for p in produtos
-    ])
+    def test_nota_fiscal(self):
+        emitido = self.app.post('/emitir_fatura', json={'cliente': 'Carlos', 'valor': 200.00})
+        pedido_id = emitido.get_json()['pedido_id']
+        resposta = self.app.get(f'/nota_fiscal/{pedido_id}')
+        self.assertEqual(resposta.status_code, 200)
+        dados = resposta.get_json()
+        self.assertIn('pdf', dados)
+        self.assertIn('xml', dados)
 
-@app.route('/relatorios/estoque_baixo', methods=['GET'])
-def estoque_baixo():
-    produtos = Produto.query.filter(Produto.quantidade < 10).all()
-    return jsonify([
-        {'id': p.id, 'nome': p.nome, 'quantidade': p.quantidade} for p in produtos
-    ])
+    def test_nota_fiscal_inexistente(self):
+        resposta = self.app.get('/nota_fiscal/9999')
+        self.assertEqual(resposta.status_code, 404)
 
-@app.route('/relatorios/movimentacoes', methods=['GET'])
-def relatorio_movimentacoes():
-    inicio = request.args.get('inicio')
-    fim = request.args.get('fim')
+    def test_enviar_nota(self):
+        emitido = self.app.post('/emitir_fatura', json={'cliente': 'Ana', 'valor': 300.00})
+        pedido_id = emitido.get_json()['pedido_id']
+        resposta = self.app.post(f'/enviar_nota/{pedido_id}', json={'email': 'ana@teste.com'})
+        self.assertEqual(resposta.status_code, 200)
+        self.assertIn('mensagem', resposta.get_json())
 
-    if inicio and fim:
-        try:
-            inicio = datetime.fromisoformat(inicio)
-            fim = datetime.fromisoformat(fim)
-        except ValueError:
-            return jsonify({'erro': 'Formato de data inválido'}), 400
-        movimentacoes = Movimentacao.query.filter(Movimentacao.data >= inicio, Movimentacao.data <= fim).all()
-    else:
-        movimentacoes = Movimentacao.query.all()
+    def test_enviar_nota_email_invalido(self):
+        emitido = self.app.post('/emitir_fatura', json={'cliente': 'Ana', 'valor': 300.00})
+        pedido_id = emitido.get_json()['pedido_id']
+        resposta = self.app.post(f'/enviar_nota/{pedido_id}', json={'email': 'ana_teste.com'})
+        self.assertEqual(resposta.status_code, 400)
+        dados = resposta.get_json()
+        self.assertIn('erro', dados)
 
-    return jsonify([
-        {
-            'id': m.id,
-            'tipo': m.tipo,
-            'quantidade': m.quantidade,
-            'data': m.data.isoformat(),
-            'produto_id': m.produto_id
-        } for m in movimentacoes
-    ])
+    def test_enviar_nota_fatura_inexistente(self):
+        resposta = self.app.post('/enviar_nota/9999', json={'email': 'teste@teste.com'})
+        self.assertEqual(resposta.status_code, 404)
 
-@app.route('/relatorios/vendas', methods=['GET'])
-def relatorio_vendas():
-    saidas = db.session.query(
-        Produto.nome,
-        db.func.sum(Movimentacao.quantidade).label('total_vendido')
-    ).join(Movimentacao).filter(Movimentacao.tipo == 'saida') \
-     .group_by(Produto.id).order_by(db.desc('total_vendido')).all()
+# --- RODAR SERVIDOR OU TESTES ---
 
-    if not saidas:
-        return jsonify({'mensagem': 'Nenhuma venda registrada ainda'})
-
-    mais_vendido = saidas[0]
-    menos_vendido = saidas[-1]
-
-    return jsonify({
-        'mais_vendido': {'produto': mais_vendido[0], 'quantidade': mais_vendido[1]},
-        'menos_vendido': {'produto': menos_vendido[0], 'quantidade': menos_vendido[1]}
-    })
-
-# Executar
 if __name__ == '__main__':
-    app.run(debug=True)
+    import sys
+    if 'test' in sys.argv:
+        unittest.main(argv=[sys.argv[0]])
+    else:
+        with app.app_context():
+            if not os.path.exists(db_path):
+                db.create_all()
+        app.run(debug=False)
+
