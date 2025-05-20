@@ -1,0 +1,240 @@
+from flask import Flask, jsonify, request
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy.exc import IntegrityError
+from datetime import datetime
+
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///estoque.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+db = SQLAlchemy(app)
+
+# Modelos
+class Categoria(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    nome = db.Column(db.String(100), nullable=False, unique=True)
+
+class Produto(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    nome = db.Column(db.String(100), nullable=False)
+    descricao = db.Column(db.String(255))
+    preco = db.Column(db.Float, nullable=False)
+    quantidade = db.Column(db.Integer, default=0)
+    categoria_id = db.Column(db.Integer, db.ForeignKey('categoria.id'), nullable=True)
+    categoria = db.relationship('Categoria', backref=db.backref('produtos', lazy=True))
+
+class Movimentacao(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    tipo = db.Column(db.String(10), nullable=False)  # 'entrada' ou 'saida'
+    quantidade = db.Column(db.Integer, nullable=False)
+    data = db.Column(db.DateTime, default=db.func.now())
+    produto_id = db.Column(db.Integer, db.ForeignKey('produto.id'), nullable=False)
+    produto = db.relationship('Produto', backref=db.backref('movimentacoes', lazy=True))
+
+@app.before_first_request
+def init_db():
+    db.create_all()
+
+# Rotas de Categorias
+@app.route('/categorias', methods=['GET'])
+def listar_categorias():
+    categorias = Categoria.query.all()
+    return jsonify([{'id': c.id, 'nome': c.nome} for c in categorias])
+
+@app.route('/categorias', methods=['POST'])
+def criar_categoria():
+    data = request.get_json()
+    if 'nome' not in data:
+        return jsonify({'erro': 'Campo "nome" é obrigatório'}), 400
+
+    nova_categoria = Categoria(nome=data['nome'])
+    try:
+        db.session.add(nova_categoria)
+        db.session.commit()
+    except IntegrityError:
+        db.session.rollback()
+        return jsonify({'erro': 'Categoria já existe'}), 400
+
+    return jsonify({'id': nova_categoria.id, 'nome': nova_categoria.nome}), 201
+
+@app.route('/categorias/<int:id>', methods=['PUT'])
+def editar_categoria(id):
+    data = request.get_json()
+    if 'nome' not in data:
+        return jsonify({'erro': 'Campo "nome" é obrigatório'}), 400
+
+    categoria = Categoria.query.get_or_404(id)
+    categoria.nome = data['nome']
+    db.session.commit()
+    return jsonify({'id': categoria.id, 'nome': categoria.nome})
+
+@app.route('/categorias/<int:id>', methods=['DELETE'])
+def deletar_categoria(id):
+    categoria = Categoria.query.get_or_404(id)
+    if categoria.produtos:
+        return jsonify({'erro': 'Não é possível deletar categoria com produtos associados'}), 400
+
+    db.session.delete(categoria)
+    db.session.commit()
+    return jsonify({'mensagem': 'Categoria deletada com sucesso'})
+
+# Rotas de Produtos
+@app.route('/produtos', methods=['GET'])
+def listar_produtos():
+    produtos = Produto.query.all()
+    return jsonify([
+        {
+            'id': p.id,
+            'nome': p.nome,
+            'descricao': p.descricao,
+            'preco': p.preco,
+            'quantidade': p.quantidade,
+            'categoria_id': p.categoria_id
+        } for p in produtos
+    ])
+
+@app.route('/produtos', methods=['POST'])
+def criar_produto():
+    data = request.get_json()
+    obrigatorios = ['nome', 'preco']
+    if not all(campo in data for campo in obrigatorios):
+        return jsonify({'erro': 'Campos "nome" e "preco" são obrigatórios'}), 400
+
+    novo_produto = Produto(
+        nome=data['nome'],
+        descricao=data.get('descricao', ''),
+        preco=data['preco'],
+        quantidade=data.get('quantidade', 0),
+        categoria_id=data.get('categoria_id')
+    )
+    db.session.add(novo_produto)
+    db.session.commit()
+    return jsonify({'id': novo_produto.id, 'nome': novo_produto.nome}), 201
+
+@app.route('/produtos/<int:id>', methods=['PUT'])
+def editar_produto(id):
+    data = request.get_json()
+    obrigatorios = ['nome', 'preco', 'quantidade']
+    if not all(campo in data for campo in obrigatorios):
+        return jsonify({'erro': 'Campos "nome", "preco" e "quantidade" são obrigatórios'}), 400
+
+    produto = Produto.query.get_or_404(id)
+    produto.nome = data['nome']
+    produto.descricao = data.get('descricao', '')
+    produto.preco = data['preco']
+    produto.quantidade = data['quantidade']
+    produto.categoria_id = data.get('categoria_id')
+    db.session.commit()
+    return jsonify({'id': produto.id, 'nome': produto.nome})
+
+@app.route('/produtos/<int:id>', methods=['DELETE'])
+def deletar_produto(id):
+    produto = Produto.query.get_or_404(id)
+    db.session.delete(produto)
+    db.session.commit()
+    return jsonify({'mensagem': 'Produto deletado com sucesso'})
+
+# Rotas de Movimentações
+@app.route('/movimentacoes', methods=['POST'])
+def registrar_movimentacao():
+    data = request.get_json()
+    tipo = data.get('tipo')
+    quantidade = data.get('quantidade')
+    produto_id = data.get('produto_id')
+
+    if tipo not in ['entrada', 'saida'] or not all([quantidade, produto_id]):
+        return jsonify({'erro': 'Dados inválidos'}), 400
+
+    produto = Produto.query.get_or_404(produto_id)
+
+    if tipo == 'entrada':
+        produto.quantidade += quantidade
+    elif tipo == 'saida':
+        if produto.quantidade < quantidade:
+            return jsonify({'erro': 'Quantidade insuficiente em estoque'}), 400
+        produto.quantidade -= quantidade
+
+    movimentacao = Movimentacao(tipo=tipo, quantidade=quantidade, produto_id=produto_id)
+    db.session.add(movimentacao)
+    db.session.commit()
+
+    return jsonify({'mensagem': 'Movimentação registrada com sucesso'})
+
+@app.route('/movimentacoes', methods=['GET'])
+def listar_movimentacoes():
+    movimentacoes = Movimentacao.query.order_by(Movimentacao.data.desc()).all()
+    return jsonify([
+        {
+            'id': m.id,
+            'tipo': m.tipo,
+            'quantidade': m.quantidade,
+            'data': m.data.isoformat(),
+            'produto_id': m.produto_id
+        } for m in movimentacoes
+    ])
+
+# Relatórios
+@app.route('/relatorios/estoque', methods=['GET'])
+def relatorio_estoque():
+    produtos = Produto.query.all()
+    return jsonify([
+        {
+            'id': p.id,
+            'nome': p.nome,
+            'quantidade': p.quantidade
+        } for p in produtos
+    ])
+
+@app.route('/relatorios/estoque_baixo', methods=['GET'])
+def estoque_baixo():
+    produtos = Produto.query.filter(Produto.quantidade < 10).all()
+    return jsonify([
+        {'id': p.id, 'nome': p.nome, 'quantidade': p.quantidade} for p in produtos
+    ])
+
+@app.route('/relatorios/movimentacoes', methods=['GET'])
+def relatorio_movimentacoes():
+    inicio = request.args.get('inicio')
+    fim = request.args.get('fim')
+
+    if inicio and fim:
+        try:
+            inicio = datetime.fromisoformat(inicio)
+            fim = datetime.fromisoformat(fim)
+        except ValueError:
+            return jsonify({'erro': 'Formato de data inválido'}), 400
+        movimentacoes = Movimentacao.query.filter(Movimentacao.data >= inicio, Movimentacao.data <= fim).all()
+    else:
+        movimentacoes = Movimentacao.query.all()
+
+    return jsonify([
+        {
+            'id': m.id,
+            'tipo': m.tipo,
+            'quantidade': m.quantidade,
+            'data': m.data.isoformat(),
+            'produto_id': m.produto_id
+        } for m in movimentacoes
+    ])
+
+@app.route('/relatorios/vendas', methods=['GET'])
+def relatorio_vendas():
+    saidas = db.session.query(
+        Produto.nome,
+        db.func.sum(Movimentacao.quantidade).label('total_vendido')
+    ).join(Movimentacao).filter(Movimentacao.tipo == 'saida') \
+     .group_by(Produto.id).order_by(db.desc('total_vendido')).all()
+
+    if not saidas:
+        return jsonify({'mensagem': 'Nenhuma venda registrada ainda'})
+
+    mais_vendido = saidas[0]
+    menos_vendido = saidas[-1]
+
+    return jsonify({
+        'mais_vendido': {'produto': mais_vendido[0], 'quantidade': mais_vendido[1]},
+        'menos_vendido': {'produto': menos_vendido[0], 'quantidade': menos_vendido[1]}
+    })
+
+# Executar
+if __name__ == '__main__':
+    app.run(debug=True)
