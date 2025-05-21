@@ -6,7 +6,7 @@ Este projeto é uma **API RESTful** construída com **Python** e **Flask**, que 
 
 ## Funcionalidades
 
-### 📁 Categorias
+### Categorias
 - Listar categorias
 - Criar nova categoria
 - Editar categoria existente
@@ -22,7 +22,7 @@ Este projeto é uma **API RESTful** construída com **Python** e **Flask**, que 
 - Registrar **entrada** ou **saída** de produtos
 - Atualização automática da quantidade em estoque
 
-### 📊 Relatórios
+### Relatórios
 - Estoque atual de todos os produtos
 - Produtos com estoque baixo (menos de 10 unidades)
 - Histórico de movimentações (com filtro de data)
@@ -39,7 +39,7 @@ Este projeto é uma **API RESTful** construída com **Python** e **Flask**, que 
 
 ---
 
-## ▶️ Como Executar
+## Como Executar
 
 1. **Clone o repositório**:
    ```bash
