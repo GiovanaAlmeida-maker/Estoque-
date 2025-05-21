@@ -1,10 +1,10 @@
-# 📦 Sistema de Controle de Estoque com Flask
+#  Sistema de Controle de Estoque com Flask
 
 Este projeto é uma **API RESTful** construída com **Python** e **Flask**, que permite realizar o gerenciamento de um estoque simples, incluindo produtos, categorias, movimentações (entradas e saídas) e geração de relatórios.
 
 ---
 
-## 🚀 Funcionalidades
+## Funcionalidades
 
 ### 📁 Categorias
 - Listar categorias
@@ -12,13 +12,13 @@ Este projeto é uma **API RESTful** construída com **Python** e **Flask**, que 
 - Editar categoria existente
 - Deletar categoria
 
-### 📦 Produtos
+###  Produtos
 - Listar produtos
 - Cadastrar novo produto
 - Atualizar produto
 - Remover produto
 
-### 🔄 Movimentações
+### Movimentações
 - Registrar **entrada** ou **saída** de produtos
 - Atualização automática da quantidade em estoque
 
@@ -30,7 +30,7 @@ Este projeto é uma **API RESTful** construída com **Python** e **Flask**, que 
 
 ---
 
-## 🛠️ Tecnologias Utilizadas
+## Tecnologias Utilizadas
 
 - [Python 3](https://www.python.org/)
 - [Flask](https://flask.palletsprojects.com/)
